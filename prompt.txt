@@ -1,0 +1,3 @@
+some media formats are missing while scanning like .mpg, so do a research, and add media those type files. the main purpose of this application is media management, so i dont want any media to left there while scanning.
+
+also add a button on clicking it it should pops us a window with a list of supported or default media formats that application is scanning, and add an option to add a media format (.ext) to add for scanning 

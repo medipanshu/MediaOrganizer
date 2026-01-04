@@ -1,0 +1,6 @@
+__pycache__/
+.thumbnails/
+.gemini/
+*.pyc
+.idea/
+.vscode/
