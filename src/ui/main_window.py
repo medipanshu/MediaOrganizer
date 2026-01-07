@@ -693,9 +693,26 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error Opening File", f"Could not open file: {e}\nPath: {file_path}")
         else:
-            # Open image in internal viewer
-            viewer = ImageViewerById(file_path, self)
-            viewer.exec()
+            # Open image in enhanced internal viewer
+            # Find index in current_media_data
+            start_index = 0
+            for i, data in enumerate(self.current_media_data):
+                # data[1] is path
+                if data[1] == file_path:
+                    start_index = i
+                    break
+            
+            # Use self.image_viewer to keep reference (prevent GC)
+            # Close existing if open? Or allow multiple? Windows usually allows multiple or one instance.
+            # Let's simple create new one for now.
+            try:
+                from src.ui.image_viewer import ImageViewer
+                self.image_viewer_window = ImageViewer(self.current_media_data, start_index, self)
+                self.image_viewer_window.show()
+            except Exception as e:
+                print(f"Error launching image viewer: {e}")
+                # Fallback
+                QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
 
     def open_format_dialog(self):
         # Local import or use global if already imported

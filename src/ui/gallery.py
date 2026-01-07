@@ -8,6 +8,9 @@ try:
     import cv2
     # Suppress ffmpeg/opencv warnings globally
     os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+    os.environ["OPENCV_FFMPEG_DEBUG"] = "0"
+    os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
+    os.environ["OPENCV_VIDEOCAPTURE_DEBUG"] = "0"
     try:
         if hasattr(cv2, 'utils') and hasattr(cv2.utils, 'logging'):
             cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)

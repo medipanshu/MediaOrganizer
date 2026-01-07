@@ -4,6 +4,6 @@ __pycache__/
 *.pyc
 .idea/
 .vscode/
-reports/
 *.db
 prompt.txt
+reports/
