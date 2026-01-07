@@ -2,9 +2,7 @@ import os
 import time
 from PyQt6.QtCore import QThread, pyqtSignal
 from src.core.database import MediaDatabase
-
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
-VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv'}
+from src.core.config import ConfigManager
 
 class MediaScanner(QThread):
     progress_update = pyqtSignal(str) # Emit status messages
@@ -15,6 +13,7 @@ class MediaScanner(QThread):
         super().__init__()
         self.folders_to_scan = folders_to_scan if folders_to_scan else []
         self.db = MediaDatabase()
+        self.config = ConfigManager() # Load config
         self._is_running = True
         self.batch_size = 50
 
@@ -23,6 +22,10 @@ class MediaScanner(QThread):
         self.db.init_db() # Ensure DB is ready
         total_files = 0
         batch_buffer = []
+
+        # Load extensions fresh for each run
+        image_exts = self.config.get_image_extensions()
+        video_exts = self.config.get_video_extensions()
 
         for folder in self.folders_to_scan:
             if not self._is_running:
@@ -48,9 +51,9 @@ class MediaScanner(QThread):
                     ext = os.path.splitext(file)[1].lower()
                     
                     file_type = None
-                    if ext in IMAGE_EXTENSIONS:
+                    if ext in image_exts:
                         file_type = 'image'
-                    elif ext in VIDEO_EXTENSIONS:
+                    elif ext in video_exts:
                         file_type = 'video'
                     
                     if file_type:

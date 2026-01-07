@@ -163,8 +163,8 @@ class MediaDatabase:
             return []
         
         try:
-            # Fetch all image paths
-            self.cursor.execute("SELECT file_path FROM media_files WHERE file_type='image'")
+            # Fetch all media paths (images and videos)
+            self.cursor.execute("SELECT file_path FROM media_files")
             results = self.cursor.fetchall()
             
             # Extract unique directories
@@ -176,6 +176,37 @@ class MediaDatabase:
         except sqlite3.Error as e:
             print(f"Error fetching image folders: {e}")
             return []
+        finally:
+            self.close()
+
+    def remove_media_in_folder(self, folder_path):
+        """Removes all media files in a specific folder from the database."""
+        self.connect()
+        if not self.connection:
+            return 0
+            
+        try:
+            # Normalize path
+            folder_path = os.path.normpath(folder_path)
+            
+            # Ensure path ends with separator for correct prefix matching if needed, 
+            # OR just rely on correct usage. 
+            # We want to match "D:\Photos\Vacation\*"
+            
+            # Strategy: Use LIKE with normalized separator
+            # Replace / with \ just in case
+            search_pattern = folder_path.replace('/', '\\') + '\\%'
+            
+            # Also remove the folder itself if it was somehow added as a file (unlikely but safe)
+            # Actually, we want to remove FILES inside this folder.
+            
+            self.cursor.execute("DELETE FROM media_files WHERE replace(file_path, '/', '\\') LIKE ?", (search_pattern,))
+            deleted_count = self.cursor.rowcount
+            self.connection.commit()
+            return deleted_count
+        except sqlite3.Error as e:
+            print(f"Error removing media in folder: {e}")
+            return 0
         finally:
             self.close()
 

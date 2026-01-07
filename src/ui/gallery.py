@@ -48,15 +48,48 @@ class ThumbnailRunnable(QRunnable):
                 reader.setScaledSize(target_size)
                 image = reader.read()
                 
-                # 3. Save to cache
-                if not image.isNull():
-                    # Ensure cache directory still exists (user might have deleted it)
-                    if not os.path.exists(cache_dir):
-                        try:
-                            os.makedirs(cache_dir)
-                        except OSError:
-                            pass
-                    image.save(cache_path, "JPG", quality=80)
+        elif self.file_type == 'video':
+            try:
+                import cv2
+                # Suppress ffmpeg/opencv warnings
+                os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+                cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+                
+                # Capture video
+                cap = cv2.VideoCapture(self.file_path)
+                if cap.isOpened():
+                    # Read the first frame
+                    ret, frame = cap.read()
+                    if ret:
+                        # Convert to RGB (OpenCV uses BGR)
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        
+                        # Convert to QImage
+                        h, w, ch = rgb_frame.shape
+                        bytes_per_line = ch * w
+                        temp_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                        
+                        # Scale it
+                        image = temp_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                        
+                        # Explicitly copy to detach from cv2 buffer which might be garbage collected
+                        image = image.copy()
+                    
+                    cap.release()
+            except ImportError:
+                print("OpenCV not found. Install opencv-python for video thumbnails.")
+            except Exception as e:
+                print(f"Error generating video thumbnail for {self.file_path}: {e}")
+
+        # 3. Save to cache (if we generated something)
+        if not image.isNull():
+            # Ensure cache directory still exists (user might have deleted it)
+            if not os.path.exists(cache_dir):
+                try:
+                    os.makedirs(cache_dir)
+                except OSError:
+                    pass
+            image.save(cache_path, "JPG", quality=80)
             
         # If image is null, we can return empty QImage, main thread handles fallback
         self.result_signal.emit(self.index_row, image)
@@ -140,6 +173,8 @@ class ThumbnailLoader(QObject):
         self.pending_tasks.clear()
 
 class GalleryModel(QAbstractListModel):
+    FileTypeRole = Qt.ItemDataRole.UserRole + 1
+
     def __init__(self, media_files=None):
         super().__init__()
         self.media_files = media_files if media_files else []
@@ -177,6 +212,9 @@ class GalleryModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return filename
             
+        if role == self.FileTypeRole:
+            return file_type
+
         if role == Qt.ItemDataRole.DecorationRole:
             # Check cache
             if row in self.icon_cache:
@@ -246,6 +284,7 @@ class MediaDelegate(QStyledItemDelegate):
         # Data
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         text = index.data(Qt.ItemDataRole.DisplayRole)
+        file_type = index.data(GalleryModel.FileTypeRole)
         
         # Rects
         rect = option.rect
@@ -259,6 +298,36 @@ class MediaDelegate(QStyledItemDelegate):
              icon.paint(painter, icon_rect, Qt.AlignmentFlag.AlignCenter)
         elif isinstance(icon, QPixmap): # Backup
              painter.drawPixmap(icon_rect, icon)
+             
+        # 1.5 Draw Video Overlay
+        if file_type == 'video':
+            # Semi-transparent circle background
+            overlay_size = 30
+            overlay_rect = QRect(icon_rect.right() - overlay_size, icon_rect.bottom() - overlay_size, overlay_size, overlay_size)
+            
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150)) # Black with alpha
+            painter.drawEllipse(overlay_rect)
+            
+            # White Play Triangle
+            painter.setBrush(Qt.GlobalColor.white)
+            triangle_path = QRect(overlay_rect.x() + 8, overlay_rect.y() + 8, 14, 14)
+            # Simple triangle drawing manually or use standard icon?
+            # Creating a triangle polygon
+            from PyQt6.QtGui import QPolygon, QPolygonF
+            from PyQt6.QtCore import QPointF
+            
+            center_x = overlay_rect.center().x()
+            center_y = overlay_rect.center().y()
+            
+            # Points for a right-pointing triangle
+            # (Left-Top, Left-Bottom, Right-Middle)
+            points = [
+                QPointF(center_x - 5, center_y - 8),
+                QPointF(center_x - 5, center_y + 8),
+                QPointF(center_x + 8, center_y)
+            ]
+            painter.drawPolygon(QPolygonF(points))
         
         # 2. Draw Text
         text_rect = QRect(rect.x(), 

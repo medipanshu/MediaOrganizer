@@ -3,7 +3,7 @@ import os
 import subprocess
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QFileDialog, QLabel, QProgressBar, QMessageBox, QDialog, QScrollArea,
-                             QSplitter, QTreeView, QListView, QApplication)
+                             QSplitter, QTreeView, QListView, QApplication, QMenu)
 from PyQt6.QtCore import Qt, QUrl, QDir, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QDesktopServices, QPixmap, QAction, QFileSystemModel, QStandardItemModel, QStandardItem
 from src.core.database import MediaDatabase
@@ -63,6 +63,8 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if screen:
             self.resize(screen.availableGeometry().size())
+        else:
+            self.resize(1200, 800)
             
         self.showMaximized()
 
@@ -70,9 +72,183 @@ class MainWindow(QMainWindow):
         self.scanner = None
         self.loader_thread = None
         
+        # Filtering State
+        self.current_media_data = [] # Source of truth (unfiltered)
+        self.active_filters = {
+            'types': {'image', 'video'}, # Default: Show both
+            'exts': None # None means "All", set() means "Specific"
+        }
+        
         self.init_ui()
         # self.load_media() # Removed synchronous call
         self.start_async_loading()
+
+    # ... (start_async_loading, on_media_loaded, on_folders_loaded, on_loading_finished, init_ui remain unchanged)
+    # ... (skipping to show_filter_menu to be brief in replacement context? 
+    # Actually I need to be careful with line numbers. I'll target specific blocks.)
+
+    def show_filter_menu(self):
+        menu = QMenu(self)
+        
+        # Helper to get extensions by type
+        image_exts = set()
+        video_exts = set()
+        
+        for item in self.current_media_data:
+            path = item[1]
+            m_type = item[4]
+            ext = os.path.splitext(path)[1].lower()
+            
+            if m_type == 'image':
+                image_exts.add(ext)
+            elif m_type == 'video':
+                video_exts.add(ext)
+
+        # --- Images Submenu ---
+        images_menu = menu.addMenu("Images")
+        
+        img_sel_all = QAction("Select All", self)
+        img_sel_all.triggered.connect(lambda: self.set_category_filter_state('image', True))
+        images_menu.addAction(img_sel_all)
+
+        img_desel_all = QAction("Deselect All", self)
+        img_desel_all.triggered.connect(lambda: self.set_category_filter_state('image', False))
+        images_menu.addAction(img_desel_all)
+        
+        images_menu.addSeparator()
+        
+        if image_exts:
+            sorted_img_exts = sorted(list(image_exts))
+            current_exts_filter = self.active_filters['exts']
+            
+            for ext in sorted_img_exts:
+                action = QAction(ext, self)
+                action.setCheckable(True)
+                is_checked = (current_exts_filter is None) or (ext in current_exts_filter)
+                action.setChecked(is_checked)
+                action.triggered.connect(lambda checked, e=ext: self.toggle_filter('exts', e, checked, type_context='image'))
+                images_menu.addAction(action)
+
+        # --- Videos Submenu ---
+        videos_menu = menu.addMenu("Videos")
+        
+        vid_sel_all = QAction("Select All", self)
+        vid_sel_all.triggered.connect(lambda: self.set_category_filter_state('video', True))
+        videos_menu.addAction(vid_sel_all)
+
+        vid_desel_all = QAction("Deselect All", self)
+        vid_desel_all.triggered.connect(lambda: self.set_category_filter_state('video', False))
+        videos_menu.addAction(vid_desel_all)
+        
+        videos_menu.addSeparator()
+        
+        if video_exts:
+            sorted_vid_exts = sorted(list(video_exts))
+            current_exts_filter = self.active_filters['exts']
+            
+            for ext in sorted_vid_exts:
+                action = QAction(ext, self)
+                action.setCheckable(True)
+                is_checked = (current_exts_filter is None) or (ext in current_exts_filter)
+                action.setChecked(is_checked)
+                action.triggered.connect(lambda checked, e=ext: self.toggle_filter('exts', e, checked, type_context='video'))
+                videos_menu.addAction(action)
+        
+        menu.exec(self.filter_btn.mapToGlobal(self.filter_btn.rect().bottomLeft()))
+
+    def set_category_filter_state(self, category_type, state):
+        # 1. Update Type Filter
+        if state:
+            self.active_filters['types'].add(category_type)
+        else:
+            self.active_filters['types'].discard(category_type)
+            
+        # 2. Update Extension Filter
+        # If selecting all, we need to make sure extensions for this type are effectively included.
+        # If deselecting all, we need to make sure extensions for this type are effectively excluded.
+        
+        # Collect relevant extensions for this category
+        relevant_exts = set()
+        for item in self.current_media_data:
+            if item[4] == category_type:
+                ext = os.path.splitext(item[1])[1].lower()
+                relevant_exts.add(ext)
+                
+        current_ext_filter = self.active_filters['exts']
+        
+        if state:
+            # SELECT ALL
+            if current_ext_filter is not None:
+                # We have a specific list, let's add these to it
+                current_ext_filter.update(relevant_exts)
+                # Optimization: If we now have ALL possible extensions, we can revert to None? 
+                # Doing simply adding is safer.
+        else:
+            # DESELECT ALL
+            if current_ext_filter is None:
+                # Transition from "All Allowed" to "Specific Allowed" (All MINUS these)
+                all_possible = {os.path.splitext(x[1])[1].lower() for x in self.current_media_data}
+                self.active_filters['exts'] = all_possible
+                self.active_filters['exts'].difference_update(relevant_exts)
+            else:
+                # Remove them from existing specific list
+                current_ext_filter.difference_update(relevant_exts)
+                
+        self.apply_filters()
+
+
+
+    def toggle_filter(self, category, value, checked, type_context=None):
+        if category == 'types':
+            if checked:
+                self.active_filters['types'].add(value)
+            else:
+                self.active_filters['types'].discard(value)
+        
+        elif category == 'exts':
+            current = self.active_filters['exts']
+            
+            if checked and type_context:
+                self.active_filters['types'].add(type_context)
+
+            if current is None:
+                # Transition from All -> Specific (minus one)
+                if not checked:
+                    # Gather all current
+                    all_possible = {os.path.splitext(x[1])[1].lower() for x in self.current_media_data}
+                    self.active_filters['exts'] = all_possible
+                    self.active_filters['exts'].discard(value)
+            else:
+                if checked:
+                    current.add(value)
+                else:
+                    current.discard(value)
+        
+        self.apply_filters()
+
+    def apply_filters(self):
+        filtered_media = []
+        
+        allowed_types = self.active_filters['types']
+        allowed_exts = self.active_filters['exts']
+        
+        for item in self.current_media_data:
+            # DB Schema: 0=id, 1=path, 2=filename, 3=ext, 4=type
+            m_path = item[1]
+            m_type = item[4] # Correct index for 'file_type'
+            
+            if m_type not in allowed_types:
+                continue
+                
+            if allowed_exts is not None:
+                ext = os.path.splitext(m_path)[1].lower()
+                if ext not in allowed_exts:
+                    continue
+            
+            filtered_media.append(item)
+            
+        self.gallery_model.update_data(filtered_media)
+        self.statusBar().showMessage(f"Showing {len(filtered_media)} files (Filtered from {len(self.current_media_data)})")
 
     def start_async_loading(self):
         self.statusBar().showMessage("Loading media...")
@@ -94,7 +270,8 @@ class MainWindow(QMainWindow):
         self.loader_thread.start()
 
     def on_media_loaded(self, media):
-        self.gallery_model.update_data(media)
+        self.current_media_data = media
+        self.apply_filters()
         
     def on_folders_loaded(self, folders):
         self.update_image_folder_tree(folders)
@@ -114,6 +291,14 @@ class MainWindow(QMainWindow):
         self.add_folder_btn = QPushButton("Add Folder")
         self.add_folder_btn.clicked.connect(self.select_folder)
         controls_layout.addWidget(self.add_folder_btn)
+
+        self.manage_formats_btn = QPushButton("Manage Formats")
+        self.manage_formats_btn.clicked.connect(self.open_format_dialog)
+        controls_layout.addWidget(self.manage_formats_btn)
+        
+        self.filter_btn = QPushButton("Filter")
+        self.filter_btn.clicked.connect(self.show_filter_menu)
+        controls_layout.addWidget(self.filter_btn)
         
         controls_layout.addStretch()
         main_layout.addLayout(controls_layout)
@@ -126,6 +311,11 @@ class MainWindow(QMainWindow):
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         
         # 1. File Tree (Top)
+        # 1. File Tree (Top) Container
+        top_left_widget = QWidget()
+        top_left_layout = QVBoxLayout(top_left_widget)
+        top_left_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.file_model = QFileSystemModel()
         self.file_model.setRootPath(QDir.rootPath())
         self.file_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
@@ -136,17 +326,39 @@ class MainWindow(QMainWindow):
         for i in range(1, 4):
             self.tree_view.hideColumn(i)
         self.tree_view.clicked.connect(self.on_tree_clicked)
-        left_splitter.addWidget(self.tree_view)
         
-        # 2. Image Folders Tree (Bottom)
+        top_left_layout.addWidget(self.tree_view)
+        
+        # Scan Button
+        self.scan_btn = QPushButton("Deep Scan Directory")
+        self.scan_btn.setEnabled(False) # Disabled until folder selected
+        self.scan_btn.clicked.connect(self.scan_selected_directory)
+        top_left_layout.addWidget(self.scan_btn)
+        
+        left_splitter.addWidget(top_left_widget)
+        
+        # 2. Image Folders Tree (Bottom) Container
+        bottom_left_widget = QWidget()
+        bottom_left_layout = QVBoxLayout(bottom_left_widget)
+        bottom_left_layout.setContentsMargins(0, 0, 0, 0)
+
         self.image_folder_model = QStandardItemModel()
-        self.image_folder_model.setHorizontalHeaderLabels(["Image Folders"])
+        self.image_folder_model.setHorizontalHeaderLabels(["Media Folders"])
         self.image_folder_view = QTreeView()
         self.image_folder_view.setModel(self.image_folder_model)
         self.image_folder_view.setHeaderHidden(True)
         self.image_folder_view.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
         self.image_folder_view.clicked.connect(self.on_image_folder_clicked)
-        left_splitter.addWidget(self.image_folder_view)
+        
+        bottom_left_layout.addWidget(self.image_folder_view)
+        
+        # Remove Folder Button
+        self.remove_folder_btn = QPushButton("Remove Folder")
+        self.remove_folder_btn.setEnabled(False)
+        self.remove_folder_btn.clicked.connect(self.remove_selected_folder)
+        bottom_left_layout.addWidget(self.remove_folder_btn)
+        
+        left_splitter.addWidget(bottom_left_widget)
         
         # Add left split to main split
         self.splitter.addWidget(left_splitter)
@@ -183,6 +395,7 @@ class MainWindow(QMainWindow):
         path = self.file_model.filePath(index)
         if path:
             self.filter_media_by_path(path)
+            self.scan_btn.setEnabled(True)
             
     def on_image_folder_clicked(self, index):
         item = self.image_folder_model.itemFromIndex(index)
@@ -192,6 +405,34 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.ItemDataRole.UserRole)
             if path:
                 self.filter_media_by_path(path)
+                self.remove_folder_btn.setEnabled(True)
+
+    def remove_selected_folder(self):
+        index = self.image_folder_view.currentIndex()
+        if not index.isValid():
+            return
+            
+        item = self.image_folder_model.itemFromIndex(index)
+        if not item:
+            return
+            
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+            
+        # Confirmation Dialog
+        reply = QMessageBox.question(self, 'Remove Folder', 
+                                     f"Are you sure you want to remove this folder from the library?\n\n{path}\n\nThis will NOT delete files from disk, only from the database.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                                     QMessageBox.StandardButton.No)
+                                     
+        if reply == QMessageBox.StandardButton.Yes:
+            count = self.db.remove_media_in_folder(path)
+            QMessageBox.information(self, "Folder Removed", f"Removed {count} files from the library.")
+            
+            # Refresh
+            self.remove_folder_btn.setEnabled(False)
+            self.load_media()
 
     def filter_media_by_path(self, path):
         # Normalize to match DB storage
@@ -203,7 +444,11 @@ class MainWindow(QMainWindow):
             if not media:
                 self.statusBar().showMessage(f"No media found in: {normalized_path}")
             
-            self.gallery_model.update_data(media)
+            if not media:
+                self.statusBar().showMessage(f"No media found in: {normalized_path}")
+            
+            self.current_media_data = media
+            self.apply_filters()
         except Exception as e:
             self.statusBar().showMessage(f"Error loading media: {e}")
             print(f"Error in filter_media_by_path: {e}")
@@ -212,6 +457,15 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder to Scan")
         if folder:
             self.start_scan([folder])
+
+    def scan_selected_directory(self):
+        index = self.tree_view.currentIndex()
+        if not index.isValid():
+             return
+             
+        path = self.file_model.filePath(index)
+        if path and os.path.isdir(path):
+            self.start_scan([path])
 
     def start_scan(self, folders):
         if self.scanner and self.scanner.isRunning():
@@ -242,7 +496,7 @@ class MainWindow(QMainWindow):
         
     def update_image_folder_tree(self, folders):
         self.image_folder_model.clear()
-        self.image_folder_model.setHorizontalHeaderLabels(["Image Folders"])
+        self.image_folder_model.setHorizontalHeaderLabels(["Media Folders"])
         
         root_item = self.image_folder_model.invisibleRootItem()
         
@@ -442,3 +696,13 @@ class MainWindow(QMainWindow):
             # Open image in internal viewer
             viewer = ImageViewerById(file_path, self)
             viewer.exec()
+
+    def open_format_dialog(self):
+        # Local import or use global if already imported
+        try:
+            from src.ui.format_dialog import FormatManagerDialog
+            dialog = FormatManagerDialog(self)
+            dialog.exec()
+        except ImportError:
+            QMessageBox.critical(self, "Error", "Could not load Format Manager.")
+
