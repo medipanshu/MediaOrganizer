@@ -3,6 +3,19 @@ from PyQt6.QtWidgets import QListView, QAbstractItemView, QFileIconProvider, QAp
 from PyQt6.QtCore import Qt, QAbstractListModel, QSize, QFileInfo, pyqtSignal, QRunnable, QThreadPool, QObject, pyqtSlot, QThread, QRect
 from PyQt6.QtGui import QIcon, QPixmap, QImageReader, QImage, QPainter, QColor, QBrush, QFontMetrics
 
+# Try importing OpenCV globally to avoid repeated overhead
+try:
+    import cv2
+    # Suppress ffmpeg/opencv warnings globally
+    os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+    try:
+        if hasattr(cv2, 'utils') and hasattr(cv2.utils, 'logging'):
+            cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+    except AttributeError:
+        pass 
+except ImportError:
+    cv2 = None
+
 class ThumbnailRunnable(QRunnable):
     def __init__(self, index_row, file_path, file_type, icon_provider, result_signal):
         super().__init__()
@@ -49,37 +62,51 @@ class ThumbnailRunnable(QRunnable):
                 image = reader.read()
                 
         elif self.file_type == 'video':
-            try:
-                import cv2
-                # Suppress ffmpeg/opencv warnings
-                os.environ["OPENCV_LOG_LEVEL"] = "OFF"
-                cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
-                
-                # Capture video
-                cap = cv2.VideoCapture(self.file_path)
-                if cap.isOpened():
-                    # Read the first frame
-                    ret, frame = cap.read()
-                    if ret:
-                        # Convert to RGB (OpenCV uses BGR)
-                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        
-                        # Convert to QImage
-                        h, w, ch = rgb_frame.shape
-                        bytes_per_line = ch * w
-                        temp_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                        
-                        # Scale it
-                        image = temp_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                        
-                        # Explicitly copy to detach from cv2 buffer which might be garbage collected
-                        image = image.copy()
-                    
-                    cap.release()
-            except ImportError:
+            if cv2 is None:
                 print("OpenCV not found. Install opencv-python for video thumbnails.")
-            except Exception as e:
-                print(f"Error generating video thumbnail for {self.file_path}: {e}")
+            else:
+                try:
+                    # Capture video - Force FFMPEG backend if possible for better compatibility
+                    # If that fails, it usually falls back, but let's try ANY if FFMPEG is issue
+                    # Actually, CAP_ANY is default. Let's try explicit FFMPEG first.
+                    cap = cv2.VideoCapture(self.file_path, cv2.CAP_FFMPEG)
+                
+                    if not cap.isOpened():
+                        # Fallback to default
+                        cap = cv2.VideoCapture(self.file_path)
+                        
+                    if cap.isOpened():
+                        # Read the first valid frame
+                        # Sometimes the first few frames are empty/black/corrupt
+                        for i in range(5):
+                            ret, frame = cap.read()
+                            if ret and frame is not None and frame.size > 0:
+                                # Convert to RGB (OpenCV uses BGR)
+                                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                
+                                # Convert to QImage
+                                h, w, ch = rgb_frame.shape
+                                bytes_per_line = ch * w
+                                temp_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                                
+                                # Scale it
+                                image = temp_image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                                
+                                # Explicitly copy
+                                image = image.copy()
+                                break # Found a frame
+                            else:
+                                # Try seeking a bit? 
+                                pass
+                        
+                        if image.isNull():
+                            print(f"Failed to extract any frame from: {self.file_path}")
+                            
+                        cap.release()
+                    else:
+                        print(f"Could not open video file: {self.file_path}")
+                except Exception as e:
+                    print(f"Error generating video thumbnail for {self.file_path}: {e}")
 
         # 3. Save to cache (if we generated something)
         if not image.isNull():
@@ -104,7 +131,8 @@ class ThumbnailLoader(QObject):
         super().__init__()
         self.thread_pool = QThreadPool()
         # Keep concurrency low to prevent UI stutter
-        self.max_workers = 4 
+        # REDUCED TO 2 to fix initial UI lag
+        self.max_workers = 2 
         self.thread_pool.setMaxThreadCount(self.max_workers)
         
         self.active_tasks = 0
@@ -271,6 +299,13 @@ class MediaDelegate(QStyledItemDelegate):
         self.item_width = 120
         self.item_height = 160 # thumb + padding + text
         
+        # Load Video Overlay Icon
+        # Assuming relative path from CWD (main.py location)
+        self.video_overlay_icon = QPixmap("icons/icons8-vlc-media-player-24.png")
+        if self.video_overlay_icon.isNull():
+             # Fallback if path wrong or missing try searching around or just print
+             print("Warning: Could not load video overlay icon from icons/icons8-vlc-media-player-24.png")
+        
     def paint(self, painter, option, index):
         if not index.isValid():
             return
@@ -300,34 +335,16 @@ class MediaDelegate(QStyledItemDelegate):
              painter.drawPixmap(icon_rect, icon)
              
         # 1.5 Draw Video Overlay
-        if file_type == 'video':
-            # Semi-transparent circle background
-            overlay_size = 30
-            overlay_rect = QRect(icon_rect.right() - overlay_size, icon_rect.bottom() - overlay_size, overlay_size, overlay_size)
+        if file_type == 'video' and not self.video_overlay_icon.isNull():
+            # Draw icon in bottom-right corner of the thumbnail rect with some padding
+            overlay_w = self.video_overlay_icon.width()
+            overlay_h = self.video_overlay_icon.height()
             
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 150)) # Black with alpha
-            painter.drawEllipse(overlay_rect)
+            # Position: Bottom Right inside icon area
+            x = icon_rect.right() - overlay_w
+            y = icon_rect.bottom() - overlay_h
             
-            # White Play Triangle
-            painter.setBrush(Qt.GlobalColor.white)
-            triangle_path = QRect(overlay_rect.x() + 8, overlay_rect.y() + 8, 14, 14)
-            # Simple triangle drawing manually or use standard icon?
-            # Creating a triangle polygon
-            from PyQt6.QtGui import QPolygon, QPolygonF
-            from PyQt6.QtCore import QPointF
-            
-            center_x = overlay_rect.center().x()
-            center_y = overlay_rect.center().y()
-            
-            # Points for a right-pointing triangle
-            # (Left-Top, Left-Bottom, Right-Middle)
-            points = [
-                QPointF(center_x - 5, center_y - 8),
-                QPointF(center_x - 5, center_y + 8),
-                QPointF(center_x + 8, center_y)
-            ]
-            painter.drawPolygon(QPolygonF(points))
+            painter.drawPixmap(x, y, self.video_overlay_icon)
         
         # 2. Draw Text
         text_rect = QRect(rect.x(), 
