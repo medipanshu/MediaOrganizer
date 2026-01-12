@@ -1,0 +1,42 @@
+{
+    "image_extensions": [
+        ".raw",
+        ".ico",
+        ".svg",
+        ".gif",
+        ".heic",
+        ".png",
+        ".sr2",
+        ".jpg",
+        ".nef",
+        ".jpeg",
+        ".orf",
+        ".tif",
+        ".bmp",
+        ".webp",
+        ".tiff",
+        ".cr2"
+    ],
+    "video_extensions": [
+        ".mpg",
+        ".mts",
+        ".m4v",
+        ".wmv",
+        ".ts",
+        ".flv",
+        ".avi",
+        ".mpeg",
+        ".m2ts",
+        ".3gp",
+        ".webm",
+        ".mov",
+        ".mkv",
+        ".mp4"
+    ],
+    "last_scan": {
+        "timestamp": "2026-01-12 12:46:00",
+        "status": "Completed",
+        "new_files_count": 9714,
+        "total_files_scanned": "Unknown"
+    }
+}

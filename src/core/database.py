@@ -194,19 +194,43 @@ class MediaDatabase:
             # We want to match "D:\Photos\Vacation\*"
             
             # Strategy: Use LIKE with normalized separator
-            # Replace / with \ just in case
-            search_pattern = folder_path.replace('/', '\\') + '\\%'
+            search_pattern = folder_path.replace('/', '\\')
+            if not search_pattern.endswith('\\'):
+                search_pattern += '\\%'
+            else:
+                search_pattern += '%'
+                
+            print(f"DEBUG: Removing media with pattern: {search_pattern}")
             
             # Also remove the folder itself if it was somehow added as a file (unlikely but safe)
             # Actually, we want to remove FILES inside this folder.
             
             self.cursor.execute("DELETE FROM media_files WHERE replace(file_path, '/', '\\') LIKE ?", (search_pattern,))
             deleted_count = self.cursor.rowcount
+            print(f"DEBUG: Deleted count: {deleted_count}")
             self.connection.commit()
             return deleted_count
         except sqlite3.Error as e:
             print(f"Error removing media in folder: {e}")
             return 0
+        finally:
+            self.close()
+
+    def optimize_db(self):
+        """Compacts the database using VACUUM command to reclaim unused space."""
+        self.connect()
+        if not self.connection:
+            return False
+            
+        try:
+            # VACUUM requires no active transaction, which python sqlite3 usually handles well 
+            # if isolation_level is default, but we should be careful.
+            # VACUUM is effectively a transaction itself.
+            self.connection.execute("VACUUM")
+            return True
+        except sqlite3.Error as e:
+            print(f"Error optimizing database: {e}")
+            return False
         finally:
             self.close()
 

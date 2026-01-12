@@ -34,6 +34,9 @@ class MediaScanner(QThread):
             self.progress_update.emit(f"Scanning directory: {folder}")
             
             for root, dirs, files in os.walk(folder):
+                # Exclude system directories
+                dirs[:] = [d for d in dirs if d not in ['$RECYCLE.BIN', 'System Volume Information'] and not d.startswith('.')]
+                
                 if not self._is_running:
                     break
                 
@@ -70,6 +73,16 @@ class MediaScanner(QThread):
             total_files += count
 
         self.progress_update.emit(f"Scan complete. Found {total_files} new files.")
+        
+        # Save scan stats
+        scan_info = {
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'status': 'Completed',
+            'new_files_count': total_files,
+            'total_files_scanned': 'Unknown' # Could track this if needed
+        }
+        self.config.set_last_scan_info(scan_info)
+        
         self.finished_scan.emit()
 
     def stop(self):

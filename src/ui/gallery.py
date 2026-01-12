@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import QListView, QAbstractItemView, QFileIconProvider, QApplication, QStyle, QStyledItemDelegate
-from PyQt6.QtCore import Qt, QAbstractListModel, QSize, QFileInfo, pyqtSignal, QRunnable, QThreadPool, QObject, pyqtSlot, QThread, QRect
-from PyQt6.QtGui import QIcon, QPixmap, QImageReader, QImage, QPainter, QColor, QBrush, QFontMetrics
+from PyQt6.QtCore import Qt, QAbstractListModel, QSize, QFileInfo, pyqtSignal, QRunnable, QThreadPool, QObject, pyqtSlot, QThread, QRect, QPoint, QTimer
+from PyQt6.QtGui import QIcon, QPixmap, QImageReader, QImage, QPainter, QColor, QBrush, QFontMetrics, QPen
 
 # Try importing OpenCV globally to avoid repeated overhead
 try:
@@ -18,6 +18,13 @@ try:
         pass 
 except ImportError:
     cv2 = None
+
+class GallerySeparator:
+    """Simple wrapper for a separator string."""
+    def __init__(self, label, key=None, collapsed=False):
+        self.label = label
+        self.key = key 
+        self.collapsed = collapsed
 
 class ThumbnailRunnable(QRunnable):
     def __init__(self, index_row, file_path, file_type, icon_provider, result_signal):
@@ -229,6 +236,21 @@ class GalleryModel(QAbstractListModel):
     def rowCount(self, parent=None):
         return len(self.media_files)
 
+    def flags(self, index):
+        default_flags = super().flags(index)
+        if not index.isValid():
+            return default_flags
+
+        # Check if item is separator
+        row = index.row()
+        if row < len(self.media_files):
+            item = self.media_files[row]
+            if isinstance(item, GallerySeparator):
+                # Return Enabled but NOT Selectable
+                return Qt.ItemFlag.ItemIsEnabled
+        
+        return default_flags | Qt.ItemFlag.ItemIsSelectable
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
@@ -236,6 +258,20 @@ class GalleryModel(QAbstractListModel):
         row = index.row()
         file_data = self.media_files[row]
         # file_data structure: (id, file_path, filename, extension, file_type, date, size) based on DB
+        # OR it can be a GallerySeparator object
+        item = self.media_files[row]
+        
+        if isinstance(item, GallerySeparator):
+            if role == Qt.ItemDataRole.DisplayRole:
+                return item.label
+            if role == self.FileTypeRole:
+                return "separator"
+            if role == Qt.ItemDataRole.UserRole:
+                # Return the object itself for click handling
+                return item 
+            return None
+
+        file_data = item
         file_path = file_data[1]
         filename = file_data[2]
         file_type = file_data[4]
@@ -276,8 +312,10 @@ class GalleryModel(QAbstractListModel):
         else:
              # Fallback if async gen failed or empty (video or bad image)
              if row < len(self.media_files):
-                 file_path = self.media_files[row][1]
-                 icon = self.file_icon_provider.icon(QFileInfo(file_path))
+                 item = self.media_files[row]
+                 if not isinstance(item, GallerySeparator):
+                     file_path = item[1]
+                     icon = self.file_icon_provider.icon(QFileInfo(file_path))
 
         if icon:
             # Validate row is still within bounds (model might have been cleared)
@@ -295,7 +333,8 @@ class GalleryModel(QAbstractListModel):
 
 class MediaDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
-        super().__init__()
+        super().__init__(parent)
+        self.view = parent # Store explicit reference to the view
         self.thumb_size = 100
         self.padding = 10
         self.text_height = 40
@@ -324,6 +363,65 @@ class MediaDelegate(QStyledItemDelegate):
         text = index.data(Qt.ItemDataRole.DisplayRole)
         file_type = index.data(GalleryModel.FileTypeRole)
         
+        # 0. Draw Separator
+        if file_type == 'separator':
+            # Draw Header Background (optional)
+            # painter.fillRect(option.rect, QColor("#f0f0f0"))
+            
+            # Retrieve the separator object to check collapsed state
+            # We can't easily access the object from here directly unless we passed it in UserRole?
+            # Yes, we updated Model to return item for UserRole.
+            sep_item = index.data(Qt.ItemDataRole.UserRole)
+            is_collapsed = False
+            if hasattr(sep_item, 'collapsed'):
+                is_collapsed = sep_item.collapsed
+
+            # Draw Text
+            painter.setPen(QColor("#555555"))
+            font = painter.font()
+            font.setBold(True)
+            font.setPointSize(10)
+            painter.setFont(font)
+            
+            # Arrow Indicator
+            arrow = "▶" if is_collapsed else "▼"
+            
+            # Left align with some padding
+            text_rect = QRect(option.rect.left() + 10, option.rect.top(), 
+                              option.rect.width() - 20, option.rect.height())
+            
+            # Combine arrow and label
+            display_text = f"{arrow}  {text}"
+            
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, display_text)
+            
+            # Draw Line (Cosmetic Pen for uniform 1px on all DPIs)
+            line_y = int(option.rect.center().y())
+            
+            # Calculate text width to start line after text
+            fm = QFontMetrics(font)
+            text_width = fm.horizontalAdvance(display_text)
+            
+            line_start = option.rect.left() + 20 + text_width
+            line_end = option.rect.right() - 10
+            
+            if line_end > line_start:
+                painter.save()
+                # cosmetic=True ensures 1 device pixel width always
+                pen = QPen(QColor("#cccccc"), 1)
+                pen.setCosmetic(True) 
+                painter.setPen(pen)
+                
+                # Antialiasing might still smear cosmetic lines if they fall on subpixels, 
+                # but usually cosmetic fits to grid. Disabling AA is safer for straight lines.
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                
+                painter.drawLine(int(line_start), line_y, int(line_end), line_y)
+                painter.restore()
+                
+            painter.restore()
+            return
+
         # Rects
         rect = option.rect
         
@@ -370,6 +468,14 @@ class MediaDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index):
+        file_type = index.data(GalleryModel.FileTypeRole)
+        if file_type == 'separator':
+            # Return full width of the parent view (minus a bit for scrollbar)
+            if self.view:
+                width = self.view.viewport().width() - 20 # Safety margin
+                return QSize(width, 40)
+            return QSize(200, 40)
+            
         return QSize(self.item_width, self.item_height)
 
 class GalleryView(QListView):
@@ -378,20 +484,39 @@ class GalleryView(QListView):
     def __init__(self):
         super().__init__()
         self.setViewMode(QListView.ViewMode.IconMode)
-        self.setResizeMode(QListView.ResizeMode.Adjust)
+        # Fixed: Do NOT relayout items during resize dragging. 
+        # Relayout is handled by the debounce timer in resizeEvent.
+        self.setResizeMode(QListView.ResizeMode.Fixed)
         self.setSpacing(10)
         
         # Use Delegate for precise rendering
         self.setItemDelegate(MediaDelegate(self))
         
         # Crucial for performance with heavy delegates/large lists
-        self.setUniformItemSizes(True) 
+        # BUT must be False if we have variable sized items (separators)
+        self.setUniformItemSizes(False) 
         
         # These are less critical now that delegate handles size, but good defaults
-        self.setGridSize(QSize(120, 160)) 
+        # self.setGridSize(QSize(120, 160)) # REMOVED: Blocks variable item sizes
+        self.setMovement(QListView.Movement.Static) 
         
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.doubleClicked.connect(self._on_item_double_clicked)
+        
+        # Optimize Resize
+        self._resize_timer = QTimer()
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(100) # 100ms delay
+        self._resize_timer.timeout.connect(self._on_resize_timeout)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Debounce the layout update to prevent lag
+        self._resize_timer.start()
+
+    def _on_resize_timeout(self):
+        # Force relayout of items to update separator widths
+        self.scheduleDelayedItemsLayout()
 
     def _on_item_double_clicked(self, index):
         file_path = index.data(Qt.ItemDataRole.UserRole)

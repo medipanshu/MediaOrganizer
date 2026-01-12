@@ -2,13 +2,14 @@ import sys
 import os
 import subprocess
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QFileDialog, QLabel, QProgressBar, QMessageBox, QDialog, QScrollArea,
-                             QSplitter, QTreeView, QListView, QApplication, QMenu)
+                             QPushButton, QFileDialog, QLabel, QProgressBar, QMessageBox, QFrame, QDialog, QScrollArea,
+                             QSplitter, QTreeView, QListView, QApplication, QMenu, QStyle)
 from PyQt6.QtCore import Qt, QUrl, QDir, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QDesktopServices, QPixmap, QAction, QFileSystemModel, QStandardItemModel, QStandardItem
 from src.core.database import MediaDatabase
 from src.core.scanner import MediaScanner
-from src.ui.gallery import GalleryView, GalleryModel
+from src.ui.gallery import GalleryView, GalleryModel, GallerySeparator
+from src.ui.metadata_panel import MetadataPanel
 
 class DataLoader(QObject):
     media_loaded = pyqtSignal(list)
@@ -78,6 +79,8 @@ class MainWindow(QMainWindow):
             'types': {'image', 'video'}, # Default: Show both
             'exts': None # None means "All", set() means "Specific"
         }
+        self.sort_mode = 'date' # 'date', 'size', 'name'
+        self.collapsed_sections = set() # Set of keys (generic)
         
         self.init_ui()
         # self.load_media() # Removed synchronous call
@@ -247,8 +250,18 @@ class MainWindow(QMainWindow):
             
             filtered_media.append(item)
             
-        self.gallery_model.update_data(filtered_media)
+        # Inject Separators if sorted by date OR size OR name
+        if self.sort_mode in ['date', 'size', 'name']:
+            final_data = self.inject_separators(filtered_media)
+        else:
+            final_data = filtered_media
+
+        self.gallery_model.update_data(final_data)
         self.statusBar().showMessage(f"Showing {len(filtered_media)} files (Filtered from {len(self.current_media_data)})")
+        
+        # Update toggle button text if enabled
+        if self.toggle_all_btn.isEnabled():
+            self.update_toggle_button_text()
 
     def start_async_loading(self):
         self.statusBar().showMessage("Loading media...")
@@ -270,6 +283,7 @@ class MainWindow(QMainWindow):
         self.loader_thread.start()
 
     def on_media_loaded(self, media):
+        print(f"DEBUG: Media loaded. Count: {len(media)}")
         self.current_media_data = media
         self.apply_filters()
         
@@ -288,6 +302,13 @@ class MainWindow(QMainWindow):
         # Toolbar / Control Area
         controls_layout = QHBoxLayout()
         
+        # Sidebar Toggle
+        self.toggle_sidebar_btn = QPushButton()
+        self.toggle_sidebar_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMenuButton))
+        self.toggle_sidebar_btn.setToolTip("Toggle Sidebar")
+        self.toggle_sidebar_btn.clicked.connect(self.toggle_sidebar)
+        controls_layout.addWidget(self.toggle_sidebar_btn)
+        
         self.add_folder_btn = QPushButton("Add Folder")
         self.add_folder_btn.clicked.connect(self.select_folder)
         controls_layout.addWidget(self.add_folder_btn)
@@ -296,9 +317,20 @@ class MainWindow(QMainWindow):
         self.manage_formats_btn.clicked.connect(self.open_format_dialog)
         controls_layout.addWidget(self.manage_formats_btn)
         
-        self.filter_btn = QPushButton("Filter")
-        self.filter_btn.clicked.connect(self.show_filter_menu)
-        controls_layout.addWidget(self.filter_btn)
+        # Filter button moved to Gallery Ribbon
+        # self.filter_btn = QPushButton("Filter")
+        # self.filter_btn.clicked.connect(self.show_filter_menu)
+        # controls_layout.addWidget(self.filter_btn)
+
+        # App Stats Button
+        self.stats_btn = QPushButton("App Stats")
+        self.stats_btn.clicked.connect(self.show_app_stats)
+        controls_layout.addWidget(self.stats_btn)
+
+        # View Thumbnails Button
+        self.view_thumbs_btn = QPushButton("View Thumbnails")
+        self.view_thumbs_btn.clicked.connect(self.open_thumbnails_folder)
+        controls_layout.addWidget(self.view_thumbs_btn)
         
         controls_layout.addStretch()
         main_layout.addLayout(controls_layout)
@@ -360,29 +392,123 @@ class MainWindow(QMainWindow):
         
         left_splitter.addWidget(bottom_left_widget)
         
+        # 3. Metadata Panel (Bottom-most)
+        self.metadata_panel = MetadataPanel()
+        left_splitter.addWidget(self.metadata_panel)
+        
+        # Set initial sizes for left panel (FileTree, FolderTree, Metadata)
+        # Give metadata some space
+        left_splitter.setSizes([300, 200, 300])
+
         # Add left split to main split
         self.splitter.addWidget(left_splitter)
 
         # Right Panel: content area (Progress + Gallery)
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        # Revert margin to 0 to remove gap
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
 
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        right_layout.addWidget(self.progress_bar)
+        # Combined Container for Ribbon + Gallery
+        self.combined_frame = QFrame()
+        self.combined_frame.setFrameShape(QFrame.Shape.NoFrame)
+        # Apply styled border to the combination
+        self.combined_frame.setStyleSheet("""
+            .QFrame {
+                border: 1px solid #c0c0c0;
+            }
+        """)
+        combined_layout = QVBoxLayout(self.combined_frame)
+        combined_layout.setContentsMargins(0, 0, 0, 0)
+        combined_layout.setSpacing(0)
 
-        # Gallery
+        # Gallery Ribbon (Toolbar Container)
+        self.ribbon_widget = QWidget()
+        # Remove borders from ribbon itself, rely on container border
+        self.ribbon_widget.setStyleSheet("""
+            QWidget {
+                background-color: #f5f5f5; 
+                border: none;
+                border-bottom: 1px solid #e0e0e0; /* Optional faint separator or none? User said remove below line. */
+                /* User said remove below line. Let's make it none or same color as bg? */
+                /* Actually, sticking to 'remove the below line' -> border-bottom: 0px */
+                border-bottom: 0px; 
+            }
+            QPushButton {
+                 background-color: #ffffff;
+                 border: 1px solid #c0c0c0;
+                 border-radius: 3px;
+                 padding: 2px 10px;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+            }
+        """)
+        self.ribbon_widget.setFixedHeight(34)
+        
+        ribbon_layout = QHBoxLayout(self.ribbon_widget)
+        ribbon_layout.setContentsMargins(10, 2, 10, 2)
+        ribbon_layout.setSpacing(10)
+        
+        ribbon_layout.addStretch() 
+        
+        # Filter Button
+        self.filter_btn = QPushButton("Filter")
+        self.filter_btn.setToolTip("Filter Media")
+        self.filter_btn.setFixedSize(60, 24)
+        self.filter_btn.clicked.connect(self.show_filter_menu)
+        ribbon_layout.addWidget(self.filter_btn)
+        
+        # Sort Button
+        self.sort_btn = QPushButton("Sort")
+        self.sort_btn.setToolTip("Sort Media")
+        self.sort_btn.setFixedSize(60, 24) 
+        self.sort_btn.clicked.connect(self.show_sort_menu)
+        ribbon_layout.addWidget(self.sort_btn)
+        
+        # Toggle Collapse/Expand Button
+        self.toggle_all_btn = QPushButton("Collapse All")
+        self.toggle_all_btn.setToolTip("Toggle expand/collapse for all sections")
+        self.toggle_all_btn.clicked.connect(self.on_toggle_all)
+        self.toggle_all_btn.setEnabled(self.sort_mode in ['date', 'size', 'name'])
+        ribbon_layout.addWidget(self.toggle_all_btn)
+        
+        combined_layout.addWidget(self.ribbon_widget)
+        
+        # Progress Bar (Inside container? Or above? Usually overlays or independent. 
+        # Plan had it separate. Let's put it inside or leave it?
+        # If I put it inside combined layout, it pushes gallery down.
+        # Let's keep existing structure where progress bar was separate?
+        # Wait, progress bar was in right_layout.
+        # Let's add combined_frame to right_layout. But where does GalleryView go?
+        # GalleryView needs to be INSIDE combined_frame to share border.
+        
+        # Gallery (Moved inside combined layout)
         self.gallery_model = GalleryModel()
         self.gallery_view = GalleryView()
         self.gallery_view.setModel(self.gallery_model)
+        # Remove Gallery's own border so it blends with container
+        self.gallery_view.setFrameShape(QFrame.Shape.NoFrame)
         
-        # Connect visibility checker for optimized loading
         self.gallery_model.thumbnail_loader.set_visibility_checker(self.gallery_view.is_row_visible)
         
         self.gallery_view.media_opened.connect(self.open_media)
-        right_layout.addWidget(self.gallery_view)
+        self.gallery_view.selectionModel().currentChanged.connect(self.on_gallery_selection_changed)
+        # Handle simple clicks for collapsing separators
+        self.gallery_view.clicked.connect(self.on_item_clicked)
+        
+        combined_layout.addWidget(self.gallery_view)
+        
+        right_layout.addWidget(self.combined_frame)
+
+        # Progress Bar (Keep outside or overlay? Let's put it at bottom of right layout or top?)
+        # Originally it was separate. Let's add it back to right_layout BELOW combined frame?
+        # Or ABOVE.
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setFixedHeight(5) # Slim
+        right_layout.addWidget(self.progress_bar)
         
         self.splitter.addWidget(right_widget)
         self.splitter.setSizes([300, 900])
@@ -390,6 +516,263 @@ class MainWindow(QMainWindow):
         # Status Bar
         self.setStatusBar(self.statusBar())
         self.statusBar().showMessage("Ready")
+
+    def show_sort_menu(self):
+        menu = QMenu(self)
+        
+        # Date
+        # Use lambda with explicit arguments to avoid closure issues
+        menu.addAction("Date: Newest First", lambda: self.apply_sort('date', reverse=True))
+        menu.addAction("Date: Oldest First", lambda: self.apply_sort('date', reverse=False))
+        menu.addSeparator()
+        
+        # Name
+        menu.addAction("Name: A-Z", lambda: self.apply_sort('name', reverse=False))
+        menu.addAction("Name: Z-A", lambda: self.apply_sort('name', reverse=True))
+        menu.addSeparator()
+        
+        # Size
+        menu.addAction("Size: Largest First", lambda: self.apply_sort('size', reverse=True))
+        menu.addAction("Size: Smallest First", lambda: self.apply_sort('size', reverse=False))
+        
+        menu.exec(self.sort_btn.mapToGlobal(self.sort_btn.rect().bottomLeft()))
+
+    def apply_sort(self, sort_key, reverse):
+        # Sort current_media_data in place
+        # Indices: 2=Filename, 5=Date, 6=Size
+        
+        key_idx = 5 # Default Date
+        if sort_key == 'name':
+            key_idx = 2
+        elif sort_key == 'size':
+            key_idx = 6
+            
+        try:
+            # Simple Sort
+            # Note: lower() for filename case-insensitive sort if string
+            if sort_key == 'name':
+                self.current_media_data.sort(key=lambda x: x[key_idx].lower(), reverse=reverse)
+                self.sort_mode = 'name'
+            elif sort_key == 'date':
+                self.current_media_data.sort(key=lambda x: x[key_idx], reverse=reverse)
+                self.sort_mode = 'date'
+            elif sort_key == 'size':
+                self.current_media_data.sort(key=lambda x: x[key_idx], reverse=reverse)
+                # For size sort, we usually want largest first (Reverse=True)
+                # If separate buckets are tricky with reverse logic, we just handle buckets based on value.
+                self.sort_mode = 'size'
+            else:
+                self.current_media_data.sort(key=lambda x: x[key_idx], reverse=reverse)
+                self.sort_mode = None
+                
+            self.apply_filters() # Refresh view
+            self.statusBar().showMessage(f"Sorted by {sort_key.capitalize()}")
+            self.update_sort_buttons_state()
+
+        except Exception as e:
+            print(f"Sort Error: {e}")
+            self.statusBar().showMessage("Error sorting media")
+
+    def update_sort_buttons_state(self):
+        """Updates the enabled state of collapse/expand buttons."""
+        enabled = self.sort_mode in ['date', 'size', 'name']
+        self.toggle_all_btn.setEnabled(enabled)
+        # Also update text to correct state
+        if enabled:
+            self.update_toggle_button_text()
+
+    def update_toggle_button_text(self):
+        """Updates the toggle button text based on current collapsed state."""
+        # Find all current keys
+        all_keys = set()
+        for item in self.current_media_data:
+            key = self.get_group_key(item)
+            if key is not None:
+                all_keys.add(key)
+        
+        # Check if all keys are in collapsed_sections
+        if not all_keys:
+             is_all_collapsed = False
+        else:
+             is_all_collapsed = all_keys.issubset(self.collapsed_sections)
+        
+        if is_all_collapsed:
+            self.toggle_all_btn.setText("Expand All")
+        else:
+            self.toggle_all_btn.setText("Collapse All")
+
+    def get_group_key(self, item):
+        """Helper to extract a grouping key from a media item based on sort mode."""
+        if self.sort_mode == 'date':
+            date_val = item[5]
+            from datetime import datetime
+            if isinstance(date_val, str) and len(date_val) >= 7:
+                 try:
+                     year = int(date_val[:4])
+                     month = int(date_val[5:7])
+                     return (year, month)
+                 except ValueError: pass
+            elif isinstance(date_val, datetime):
+                 return (date_val.year, date_val.month)
+            return (0, 0)
+            
+        elif self.sort_mode == 'size':
+            size_val = item[6] # bytes
+            if size_val < 1024: return 0
+            if size_val < 10 * 1024: return 1
+            if size_val < 1024 * 1024: return 2
+            if size_val < 10 * 1024 * 1024: return 3
+            if size_val < 100 * 1024 * 1024: return 4
+            return 5
+            
+        elif self.sort_mode == 'name':
+            filename = item[2]
+            if filename:
+                first_char = filename[0].upper()
+                if first_char.isalpha():
+                    return first_char
+            return '#'
+            
+        return None
+
+    def get_group_label(self, key):
+        """Returns visual label for a key."""
+        if self.sort_mode == 'date':
+            if key == (0, 0): return "Unknown Date"
+            import calendar
+            try:
+                month_name = calendar.month_name[key[1]]
+                return f"{month_name} {key[0]}"
+            except IndexError: return "Unknown Date"
+            
+        elif self.sort_mode == 'size':
+            labels = {
+                0: "Tiny (< 1 KB)",
+                1: "Very Small (1 KB - 10 KB)",
+                2: "Small (10 KB - 1 MB)",
+                3: "Medium (1 MB - 10 MB)",
+                4: "Large (10 MB - 100 MB)",
+                5: "Huge (> 100 MB)"
+            }
+            return labels.get(key, "Unknown Size")
+            
+        elif self.sort_mode == 'name':
+            return key
+            
+        return "Unknown"
+
+    def on_toggle_all(self):
+        """Toggles between Collapse All and Expand All."""
+        # Check current state
+        all_keys = set()
+        for item in self.current_media_data:
+            key = self.get_group_key(item)
+            if key is not None:
+                all_keys.add(key)
+        
+        if not all_keys:
+            return
+
+        is_all_collapsed = all_keys.issubset(self.collapsed_sections)
+        
+        if is_all_collapsed:
+            # Expand All
+            self.collapsed_sections.clear()
+        else:
+            # Collapse All
+            self.collapsed_sections.update(all_keys)
+            
+        self.apply_filters()
+
+    def inject_separators(self, media_list):
+        """Injects GallerySeparator objects into the list."""
+        if not media_list:
+            return []
+            
+        new_list = []
+        current_key = None
+        
+        # We need to know if the current section is collapsed to skip items
+        is_current_section_collapsed = False
+        
+        for item in media_list:
+            key = self.get_group_key(item)
+            
+            # If we returned None key, it means no grouping for this item? 
+            # Or should we group under "Unknown"?
+            # If sort_mode is active, we should always return a key ideally.
+            if key is None:
+                new_list.append(item)
+                continue
+                
+            if key != current_key:
+                current_key = key
+                
+                # Check if this new section is collapsed
+                # Store key in collapsed_sections. 
+                # Note: Keys for date are tuples, size are ints. 
+                # To avoid collision if user switches sort mode but keeps set?
+                # Actually, set should be cleared on sort change? 
+                # Or we prefix keys: ('date', 2025, 1) vs ('size', 3)
+                # For simplicity, let's CLEAR collapsed_sections when sort mode changes?
+                # We haven't done that yet. Let's assume unique enough or clearing.
+                
+                # Let's prefix the key in the set to be safe?
+                # Or just rely on (year, month) tuple vs int mismatch.
+                
+                is_current_section_collapsed = (key in self.collapsed_sections)
+                
+                label = self.get_group_label(key)
+                
+                # Create Separator
+                sep = GallerySeparator(label, key=key, collapsed=is_current_section_collapsed)
+                new_list.append(sep)
+            
+            # Add item ONLY if not collapsed
+            if not is_current_section_collapsed:
+                new_list.append(item)
+            
+        return new_list
+
+    def on_item_clicked(self, index):
+        if not index.isValid():
+            return
+            
+        # Check if it's a separator
+        item_data = index.data(Qt.ItemDataRole.UserRole)
+        # With our changes, GallerySeparator returns ITSELF for UserRole
+        if isinstance(item_data, GallerySeparator):
+            key = item_data.key
+            # Key can be int or tuple or None
+            if key is not None:
+                if key in self.collapsed_sections:
+                    self.collapsed_sections.remove(key)
+                else:
+                    self.collapsed_sections.add(key)
+                
+                # Refresh view (re-inject separators with new state)
+                self.apply_filters()
+
+    def on_gallery_selection_changed(self, current, previous):
+        if not current.isValid():
+            self.metadata_panel.update_info(None)
+            return
+
+        # Use the data directly from the model index
+        item_data = current.data(Qt.ItemDataRole.UserRole)
+        
+        # Check if regular file path (str) or Separator (DateSeparator object)
+        if isinstance(item_data, str):
+             self.metadata_panel.update_info(item_data)
+        else:
+             # Separator or None
+             self.metadata_panel.update_info(None)
+
+    def toggle_sidebar(self):
+        # The left panel is the first widget in the main splitter
+        if self.splitter.count() > 0:
+            left_panel = self.splitter.widget(0)
+            left_panel.setVisible(not left_panel.isVisible())
 
     def on_tree_clicked(self, index):
         path = self.file_model.filePath(index)
@@ -432,6 +815,9 @@ class MainWindow(QMainWindow):
             
             # Refresh
             self.remove_folder_btn.setEnabled(False)
+            # Explicitly clear view to give visual feedback
+            self.current_media_data = []
+            self.gallery_model.update_data([])
             self.load_media()
 
     def filter_media_by_path(self, path):
@@ -722,4 +1108,24 @@ class MainWindow(QMainWindow):
             dialog.exec()
         except ImportError:
             QMessageBox.critical(self, "Error", "Could not load Format Manager.")
+
+    def show_app_stats(self):
+        try:
+            from src.ui.stats_dialog import StatsDialog
+            dialog = StatsDialog(self)
+            dialog.exec()
+        except ImportError as e:
+            QMessageBox.critical(self, "Error", f"Could not load Stats Dialog: {e}")
+
+    def open_thumbnails_folder(self):
+        # Path to .thumbnails
+        thumb_dir = os.path.join(os.getcwd(), '.thumbnails')
+        if not os.path.exists(thumb_dir):
+            os.makedirs(thumb_dir)
+            
+        try:
+            url = QUrl.fromLocalFile(thumb_dir)
+            QDesktopServices.openUrl(url)
+        except Exception as e:
+             QMessageBox.warning(self, "Error", f"Could not open thumbnails folder: {e}")
 

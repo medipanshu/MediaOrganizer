@@ -76,3 +76,15 @@ class ConfigManager:
                 self.save_config()
                 return True
         return False
+
+    def get_last_scan_info(self):
+        return self.config.get('last_scan', {
+            'timestamp': 'Never',
+            'status': 'N/A',
+            'new_files_count': 0,
+            'total_files_scanned': 0
+        })
+
+    def set_last_scan_info(self, info):
+        self.config['last_scan'] = info
+        self.save_config()
